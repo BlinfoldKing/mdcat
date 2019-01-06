@@ -27,7 +27,7 @@ use std::io::{stdin, stdout};
 use std::path::PathBuf;
 use syntect::parsing::SyntaxSet;
 
-use mdcat::{ResourceAccess, TerminalCapabilities, TerminalSize};
+use mdcat::*;
 
 /// Read input for `filename`.
 ///
@@ -66,15 +66,16 @@ fn process_arguments(size: TerminalSize, args: Arguments) -> Result<(), Box<dyn 
         } else {
             let syntax_set = SyntaxSet::load_defaults_newlines();
             mdcat::push_tty(
-                &mut stdout(),
-                args.terminal_capabilities,
-                TerminalSize {
-                    width: args.columns,
-                    ..size
-                },
                 parser,
-                &base_dir,
-                args.resource_access,
+                TerminalWrite::new(
+                    &mut stdout(),
+                    args.terminal_capabilities,
+                    TerminalSize {
+                        width: args.columns,
+                        ..size
+                    },
+                ),
+                Resources::new(&base_dir, args.resource_access),
                 syntax_set,
             )?;
             Ok(())

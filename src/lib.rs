@@ -52,6 +52,66 @@ where
     Ok(())
 }
 
+/// Writing to a terminal.
+pub struct TerminalWrite<'a, W: Write> {
+    writer: &'a mut W,
+    capabilities: TerminalCapabilities,
+    size: TerminalSize,
+}
+
+impl<'a, W: Write> TerminalWrite<'a, W> {
+    /// Create a new terminal writer.
+    ///
+    /// `writer` is where to write to.  `capabilities` and `size` describe the
+    /// capabilities and size of the underlying terminal.
+    pub fn new(
+        writer: &'a mut W,
+        capabilities: TerminalCapabilities,
+        size: TerminalSize,
+    ) -> TerminalWrite<'a, W> {
+        TerminalWrite {
+            writer,
+            capabilities,
+            size,
+        }
+    }
+}
+
+#[cfg_attr(not(feature = "resources"), allow(dead_code))]
+/// Resource settings for rendering.
+pub struct Resources<'a> {
+    /// The base directory, to resolve relative paths.
+    base_dir: &'a Path,
+    /// What resources we may access when processing markdown.
+    resource_access: ResourceAccess,
+}
+
+impl<'r> Resources<'r> {
+    /// Create a new `Resources` struct.
+    ///
+    /// `base_dir` denotes the directory to resolve relative paths with, and
+    /// `resource_access` determines whether we may access remote resources.
+    pub fn new(base_dir: &'r Path, resource_access: ResourceAccess) -> Resources<'r> {
+        Resources {
+            base_dir,
+            resource_access,
+        }
+    }
+
+    /// Resolve a reference in the input.
+    ///
+    /// If `reference` parses as URL return the parsed URL.  Otherwise assume
+    /// `reference` is a file path, resolve it against `base_dir` and turn it
+    /// into a file:// URL.  If this also fails return `None`.
+    #[cfg(feature = "resources")]
+    fn resolve_reference(&self, reference: &str) -> Option<url::Url> {
+        use url::Url;
+        Url::parse(reference)
+            .or_else(|_| Url::from_file_path(self.base_dir.join(reference)))
+            .ok()
+    }
+}
+
 /// Write markdown to a TTY.
 ///
 /// Iterate over Markdown AST `events`, format each event for TTY output and
@@ -60,12 +120,9 @@ where
 /// `push_tty` tries to limit output to the given number of TTY `columns` but
 /// does not guarantee that output stays within the column limit.
 pub fn push_tty<'a, 'e, W, I>(
-    writer: &'a mut W,
-    capabilities: TerminalCapabilities,
-    size: TerminalSize,
     mut events: I,
-    base_dir: &'a Path,
-    resource_access: ResourceAccess,
+    terminal: TerminalWrite<'a, W>,
+    resources: Resources<'a>,
     syntax_set: SyntaxSet,
 ) -> Result<(), Error>
 where
@@ -75,15 +132,7 @@ where
     let theme = &ThemeSet::load_defaults().themes["Solarized (dark)"];
     events
         .try_fold(
-            Context::new(
-                writer,
-                capabilities,
-                size,
-                base_dir,
-                resource_access,
-                syntax_set,
-                theme,
-            ),
+            Context::new(terminal, resources, syntax_set, theme),
             write_event,
         )?
         .write_pending_links()?;
@@ -117,40 +166,6 @@ struct Link<'a> {
     destination: Cow<'a, str>,
     /// The link title.
     title: Cow<'a, str>,
-}
-
-/// Input context.
-#[cfg(feature = "resources")]
-struct ResourceContext<'a> {
-    /// The base directory, to resolve relative paths.
-    base_dir: &'a Path,
-    /// What resources we may access when processing markdown.
-    resource_access: ResourceAccess,
-}
-
-#[cfg(feature = "resources")]
-impl ResourceContext<'_> {
-    /// Resolve a reference in the input.
-    ///
-    /// If `reference` parses as URL return the parsed URL.  Otherwise assume
-    /// `reference` is a file path, resolve it against `base_dir` and turn it
-    /// into a file:// URL.  If this also fails return `None`.
-    fn resolve_reference(&self, reference: &str) -> Option<url::Url> {
-        use url::Url;
-        Url::parse(reference)
-            .or_else(|_| Url::from_file_path(self.base_dir.join(reference)))
-            .ok()
-    }
-}
-
-/// Context for TTY output.
-struct OutputContext<'a, W: Write> {
-    /// The terminal dimensions to limit output to.
-    size: TerminalSize,
-    /// A writer to the terminal.
-    writer: &'a mut W,
-    /// The capabilities of the terminal.
-    capabilities: TerminalCapabilities,
 }
 
 #[derive(Debug)]
@@ -221,10 +236,10 @@ struct ImageContext {
 /// Context for TTY rendering.
 struct Context<'io, 'c, 'l, W: Write> {
     #[cfg(feature = "resources")]
-    /// Context for input.
-    resources: ResourceContext<'io>,
-    /// Context for output.
-    output: OutputContext<'io, W>,
+    /// The resources context
+    resources: Resources<'io>,
+    /// The terminal writer.
+    terminal: TerminalWrite<'io, W>,
     /// Context for styling
     style: StyleContext,
     /// Context for the current block.
@@ -242,33 +257,18 @@ struct Context<'io, 'c, 'l, W: Write> {
 }
 
 impl<'io, 'c, 'l, W: Write> Context<'io, 'c, 'l, W> {
+    #[cfg_attr(not(feature = "resources"), allow(unused_variables))]
+    #[cfg_attr(not(feature = "resources"), allow(clippy::needless_pass_by_value))]
     fn new(
-        writer: &'io mut W,
-        capabilities: TerminalCapabilities,
-        size: TerminalSize,
-        base_dir: &'io Path,
-        resource_access: ResourceAccess,
+        terminal: TerminalWrite<'io, W>,
+        resources: Resources<'io>,
         syntax_set: SyntaxSet,
         theme: &'c Theme,
     ) -> Context<'io, 'c, 'l, W> {
-        #[cfg(not(feature = "resources"))]
-        {
-            // Mark variables as used if resources are disabled to keep public
-            // interface stable but avoid compiler warnings
-            let _ = base_dir;
-            let _ = resource_access;
-        }
         Context {
             #[cfg(feature = "resources")]
-            resources: ResourceContext {
-                base_dir,
-                resource_access,
-            },
-            output: OutputContext {
-                size,
-                writer,
-                capabilities,
-            },
+            resources,
+            terminal,
             style: StyleContext {
                 current: Style::new(),
                 previous: Vec::new(),
@@ -327,7 +327,7 @@ impl<'io, 'c, 'l, W: Write> Context<'io, 'c, 'l, W> {
     ///
     /// Restart all current styles after the newline.
     fn newline(&mut self) -> io::Result<()> {
-        writeln!(self.output.writer)
+        writeln!(self.terminal.writer)
     }
 
     /// Write a newline and indent.
@@ -342,7 +342,7 @@ impl<'io, 'c, 'l, W: Write> Context<'io, 'c, 'l, W> {
     /// Indent according to the current indentation level.
     fn indent(&mut self) -> io::Result<()> {
         write!(
-            self.output.writer,
+            self.terminal.writer,
             "{}",
             " ".repeat(self.block.indent_level)
         )
@@ -368,10 +368,10 @@ impl<'io, 'c, 'l, W: Write> Context<'io, 'c, 'l, W> {
 
     /// Write `text` with the given `style`.
     fn write_styled<S: AsRef<str>>(&mut self, style: &Style, text: S) -> io::Result<()> {
-        match self.output.capabilities.style {
-            StyleCapability::None => write!(self.output.writer, "{}", text.as_ref())?,
+        match self.terminal.capabilities.style {
+            StyleCapability::None => write!(self.terminal.writer, "{}", text.as_ref())?,
             StyleCapability::Ansi(ref ansi) => {
-                ansi.write_styled(self.output.writer, style, text)?
+                ansi.write_styled(self.terminal.writer, style, text)?
             }
         }
         Ok(())
@@ -430,7 +430,7 @@ impl<'io, 'c, 'l, W: Write> Context<'io, 'c, 'l, W> {
 
     /// Write a simple border.
     fn write_border(&mut self) -> io::Result<()> {
-        let separator = "\u{2500}".repeat(self.output.size.width.min(20));
+        let separator = "\u{2500}".repeat(self.terminal.size.width.min(20));
         let style = self.style.current.fg(Colour::Green);
         self.write_styled(&style, separator)?;
         self.newline()
@@ -443,9 +443,9 @@ impl<'io, 'c, 'l, W: Write> Context<'io, 'c, 'l, W> {
     fn write_highlighted(&mut self, text: Cow<'l, str>) -> io::Result<()> {
         let mut wrote_highlighted: bool = false;
         if let Some(ref mut highlighter) = self.code.current_highlighter {
-            if let StyleCapability::Ansi(ref ansi) = self.output.capabilities.style {
+            if let StyleCapability::Ansi(ref ansi) = self.terminal.capabilities.style {
                 let regions = highlighter.highlight(&text, &self.code.syntax_set);
-                highlighting::write_as_ansi(self.output.writer, ansi, &regions)?;
+                highlighting::write_as_ansi(self.terminal.writer, ansi, &regions)?;
                 wrote_highlighted = true;
             }
         }
@@ -459,9 +459,9 @@ impl<'io, 'c, 'l, W: Write> Context<'io, 'c, 'l, W> {
     /// Set a mark on the current position of the terminal if supported,
     /// otherwise do nothing.
     fn set_mark_if_supported(&mut self) -> io::Result<()> {
-        match self.output.capabilities.marks {
+        match self.terminal.capabilities.marks {
             #[cfg(feature = "iterm2")]
-            MarkCapability::ITerm2(ref marks) => marks.set_mark(self.output.writer),
+            MarkCapability::ITerm2(ref marks) => marks.set_mark(self.terminal.writer),
             MarkCapability::None => Ok(()),
         }
     }
@@ -515,7 +515,7 @@ fn start_tag<'io, 'c, 'l, W: Write>(
         Paragraph => ctx.start_inline_text()?,
         Rule => {
             ctx.start_inline_text()?;
-            let rule = "\u{2550}".repeat(ctx.output.size.width as usize);
+            let rule = "\u{2550}".repeat(ctx.terminal.size.width as usize);
             let style = ctx.style.current.fg(Colour::Green);
             ctx.write_styled(&style, rule)?
         }
@@ -571,12 +571,12 @@ fn start_tag<'io, 'c, 'l, W: Write>(
             ctx.block.level = BlockLevel::Inline;
             match ctx.list_item_kind.pop() {
                 Some(ListItemKind::Unordered) => {
-                    write!(ctx.output.writer, "\u{2022} ")?;
+                    write!(ctx.terminal.writer, "\u{2022} ")?;
                     ctx.block.indent_level += 2;
                     ctx.list_item_kind.push(ListItemKind::Unordered);
                 }
                 Some(ListItemKind::Ordered(number)) => {
-                    write!(ctx.output.writer, "{:>2}. ", number)?;
+                    write!(ctx.terminal.writer, "{:>2}. ", number)?;
                     ctx.block.indent_level += 4;
                     ctx.list_item_kind.push(ListItemKind::Ordered(number + 1));
                 }
@@ -598,11 +598,11 @@ fn start_tag<'io, 'c, 'l, W: Write>(
             // Do nothing if the terminal doesn’t support inline links of if
             // `destination` is no valid URL:  We will write a reference link
             // when closing the link tag.
-            match ctx.output.capabilities.links {
+            match ctx.terminal.capabilities.links {
                 #[cfg(feature = "osc8_links")]
                 LinkCapability::OSC8(ref osc8) => {
                     if let Some(url) = ctx.resources.resolve_reference(&destination) {
-                        osc8.set_link_url(ctx.output.writer, url)?;
+                        osc8.set_link_url(ctx.terminal.writer, url)?;
                         ctx.links.inside_inline_link = true;
                     }
                 }
@@ -612,7 +612,7 @@ fn start_tag<'io, 'c, 'l, W: Write>(
                 }
             }
         }
-        Image(link, _title) => match ctx.output.capabilities.image {
+        Image(link, _title) => match ctx.terminal.capabilities.image {
             #[cfg(feature = "terminology")]
             ImageCapability::Terminology(ref terminology) => {
                 let access = ctx.resources.resource_access;
@@ -622,8 +622,8 @@ fn start_tag<'io, 'c, 'l, W: Write>(
                     .filter(|url| access.permits(url))
                 {
                     terminology.write_inline_image(
-                        &mut ctx.output.writer,
-                        ctx.output.size,
+                        &mut ctx.terminal.writer,
+                        ctx.terminal.size,
                         &url,
                     )?;
                     ctx.image.inline_image = true;
@@ -638,7 +638,7 @@ fn start_tag<'io, 'c, 'l, W: Write>(
                     .filter(|url| access.permits(url))
                 {
                     if let Ok(contents) = iterm2.read_and_render(&url) {
-                        iterm2.write_inline_image(ctx.output.writer, url.as_str(), &contents)?;
+                        iterm2.write_inline_image(ctx.terminal.writer, url.as_str(), &contents)?;
                         ctx.image.inline_image = true;
                     }
                 }
@@ -709,10 +709,10 @@ fn end_tag<'io, 'c, 'l, W: Write>(
         Strong | Code => ctx.drop_style(),
         Link(destination, title) => {
             if ctx.links.inside_inline_link {
-                match ctx.output.capabilities.links {
+                match ctx.terminal.capabilities.links {
                     #[cfg(feature = "osc8_links")]
                     LinkCapability::OSC8(ref osc8) => {
-                        osc8.clear_link(ctx.output.writer)?;
+                        osc8.clear_link(ctx.terminal.writer)?;
                     }
                     LinkCapability::None => {}
                 }
@@ -758,23 +758,15 @@ mod tests {
 
     fn render_string(
         input: &str,
-        base_dir: &Path,
-        resource_access: ResourceAccess,
+        resources: Resources<'_>,
         syntax_set: SyntaxSet,
         capabilities: TerminalCapabilities,
         size: TerminalSize,
     ) -> Result<Vec<u8>, Error> {
         let source = Parser::new(input);
         let mut sink = Vec::new();
-        push_tty(
-            &mut sink,
-            capabilities,
-            size,
-            source,
-            base_dir,
-            resource_access,
-            syntax_set,
-        )?;
+        let terminal = TerminalWrite::new(&mut sink, capabilities, size);
+        push_tty(source, terminal, resources, syntax_set)?;
         Ok(sink)
     }
 
@@ -784,8 +776,7 @@ mod tests {
         let result = String::from_utf8(
             render_string(
                 "_lorem_ **ipsum** dolor **sit** _amet_",
-                Path::new("/"),
-                ResourceAccess::LocalOnly,
+                Resources::new(Path::new("/"), ResourceAccess::LocalOnly),
                 SyntaxSet::default(),
                 TerminalCapabilities::none(),
                 TerminalSize::default(),
