@@ -65,6 +65,7 @@ fn process_arguments(size: TerminalSize, args: Arguments) -> Result<(), Box<dyn 
             Ok(())
         } else {
             let syntax_set = SyntaxSet::load_defaults_newlines();
+            let theme = &ThemeSet::load_defaults().themes["OneHalfLight"];
             mdcat::push_tty(
                 parser,
                 TerminalWrite::new(

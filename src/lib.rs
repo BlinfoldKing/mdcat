@@ -19,7 +19,6 @@
 #[cfg(feature = "resources")]
 use url;
 
-use ansi_term::{Colour, Style};
 use failure::Error;
 use pulldown_cmark::Event::*;
 use pulldown_cmark::Tag::*;
@@ -30,7 +29,7 @@ use std::io;
 use std::io::Write;
 use std::path::Path;
 use syntect::easy::HighlightLines;
-use syntect::highlighting::{Theme, ThemeSet};
+use syntect::highlighting::{Style, Theme};
 use syntect::parsing::SyntaxSet;
 
 mod resources;
@@ -124,12 +123,12 @@ pub fn push_tty<'a, 'e, W, I>(
     terminal: TerminalWrite<'a, W>,
     resources: Resources<'a>,
     syntax_set: SyntaxSet,
+    theme: &Theme,
 ) -> Result<(), Error>
 where
     I: Iterator<Item = Event<'e>>,
     W: Write,
 {
-    let theme = &ThemeSet::load_defaults().themes["Solarized (dark)"];
     events
         .try_fold(
             Context::new(terminal, resources, syntax_set, theme),
@@ -445,7 +444,9 @@ impl<'io, 'c, 'l, W: Write> Context<'io, 'c, 'l, W> {
         if let Some(ref mut highlighter) = self.code.current_highlighter {
             if let StyleCapability::Ansi(ref ansi) = self.terminal.capabilities.style {
                 let regions = highlighter.highlight(&text, &self.code.syntax_set);
-                highlighting::write_as_ansi(self.terminal.writer, ansi, &regions)?;
+                for (style, text) in regions {
+                    ansi.write_styled(self.terminal.writer, &style, text)?;
+                }
                 wrote_highlighted = true;
             }
         }
